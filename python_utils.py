@@ -8,13 +8,68 @@ import matplotlib.pyplot as plt
 import astropy.io.ascii as Ascii
 from os import chdir, listdir
 
+def SDSS_flux_to_mag(flux,filt):
+    '''
+    Convert SDSS fluxes to magnitudes
+    flux: flux of object, float
+    filt: filter, string. Choices are ugriz
+    '''
+    SDSS_calibs = {'u': [3767, 1.4e-10], 'g': [3631, 0.9e-10], 'r': [3631, 1.2e-10], 'i': [3631, 1.8e-10], 'z': [3565, 7.4e-10]}#https://ned.ipac.caltech.edu/help/sdss/dr6/photometry.html#asinh
+    f0 = SDSS_calibs[filt][0]
+    b = SDSS_calibs[filt][1]
+    mag = -2.5*(np.arcsinh(flux/(2*b*f0))+np.log(b))/np.log(10)
+    return mag
+
+def PS1_to_SDSS(PS1_mag,g,i,filt):
+    '''
+    Converst PS1 mags to SDSS mags assuming coefficents from
+    https://iopscience.iop.org/article/10.3847/0004-637X/822/2/66 . Assumes
+    star is main sequence star.
+    PS1_mag - magnitude of obect in PS1
+    g - magnitude of obect in PS1_g
+    i - magnitude of obect in PS1_i
+    filt - filter of PS1_mag
+    '''
+    filt_coeffs = {'g': [-0.01808, -0.13595, 0.01941, -0.00183], 'r': [-0.01836, -0.03577, 0.02612, -0.00558], 'i': [0.01170, -0.00400, 0.00066, -0.00058], 'z': [-0.01062, 0.07529, -0.03592, 0.00890], 'y': [0.08924, -0.20878, 0.10360, -0.02441]}#https://iopscience.iop.org/article/10.3847/0004-637X/822/2/66
+    color = g-i
+    coeffs = filt_coeffs[filt]
+    SDSS_mag = PS1_mag - coeffs[0] - coeffs[1]*color - coeffs[2]*color**2 - coeffs[3]*color**3
+    return SDSS_mag
+
+def mass_func(a1,P):
+    '''
+    Calculates mass function assuming inclination of 90 degrees
+    a1 should have unites of lts (semi-major axis of primary)
+    P should have units of days
+    '''
+    return 4*np.pi**2*a1**3/(const.G*P**2)
+
+def min_mass(a1, P, M1):
+    '''
+    Calculates minimum companion mass given M1 and
+    assuming inclination of 90 degrees
+    a1 should have unites of lts (semi-major axis of primary)
+    P should have units of days
+    M1 should have units of solar masses
+    '''
+    lts = const.c*u.s
+    a1 = a1*lts
+    P = P*u.day
+    fm = 4*np.pi**2*a1**3/(const.G*P**2)
+    min_M2 = (((M1)**2*fm)**(1/3)).to(u.solMass)
+    return min_M2.value
+
 def wave2doppler(w, w0):
-    doppler = ((w**2-w0**2) * 3e5/ (w**2+w0**2))
-    return doppler
+    '''
+    convert wavelength to velocity around w
+    '''
+    vel = ((w**2-w0**2) * 3e5/ (w**2+w0**2))
+    return vel
 
 def region_around_line(w, flux, cont, cut, switch="None"):
-    '''cut out and normalize flux around a line
-
+    '''cut out and normalize or continuum subtract (optional) flux around a line
+    Originally from http://learn.astropy.org/rst-tutorials/UVES.html?highlight=filtertutorials,
+    but I've done a lot of tweaking to make it more customisable.
     Parameters
     ----------
     w         : 1 dim np.ndarray
@@ -50,7 +105,9 @@ def region_around_line(w, flux, cont, cut, switch="None"):
 
 def EW(wavelength, flux, line_range):
     """
-    Calcultes EW of a line (after flux has been normalised)
+    Calcultes EW of a line (after flux has been normalised). Esimates
+    error on EW by assuming lower and upper bounds for continuum range
+    have been provided.
 
     Parameters
     ----------
@@ -86,6 +143,9 @@ def EW(wavelength, flux, line_range):
     return np.array(ew_line), np.array(ew_line_e)
 
 class PowerSpec(object):
+    '''
+    Custom class for creating power spectra using astropy's PS function
+    '''
 
     def __init__(self, t, f, ferr=[]):
         """
@@ -173,18 +233,20 @@ def ephemeris(t, t0, P, folded=True, absolute=False):
 def plot_tomogram(dopmap_dir, dopmap_name, ax, colormap='magma', vmin=1, vmax=99, manual_vmax=None, log=False, r_label_angle=45, overlay_dir = "None", include_overlay = False):
 
 	"""
-        Methods to create and plot power spectra
+    Methods to create and plot power spectra. Uses the output files from
+    Enrico Kotze's DopTomag program. Adapted from a script by Colin Littlefield
+    (Thanks Colin)
 
-        Parameters
-        ----------
-        dopmapdir : 	str
-            	    	top level dir of maps
-        dopmap_name : 	str
-            		name of actual dopmap (ends in 0 for normal, 1 for inverted)
-        ax: 		matplotlib axis
-            		axis to plot to
-        cmap : 		string
-            		color map to use
+    Parameters
+    ----------
+    dopmapdir : 	str
+        	    	top level dir of maps
+    dopmap_name : 	str
+        		name of actual dopmap (ends in 0 for normal, 1 for inverted)
+    ax: 		matplotlib axis
+        		axis to plot to
+    cmap : 		string
+        		color map to use
 	vmin : 		float
 			minium percentage for color map
 	vmax : 		float
@@ -196,25 +258,6 @@ def plot_tomogram(dopmap_dir, dopmap_name, ax, colormap='magma', vmin=1, vmax=99
 	r_label_angle : float
 			At what angle should the radial labels be shown?
             """
-
-	############################################
-	# Directory & filename information
-	############################################
-
-	# Optional. The directory containing the
-	# velocity-overlay files for the donor's
-	# Roche lobe ('vSecondary.out'), the
-	# ballistic stream ('vStreamBal.out'), and
-	# the binary parameters used to calculate
-	# these ('pBinary').
-	#overlay_dir = "E:/overlays"
-
-	# If you don't want to include these overlays,
-	# set this to False.
-	#include_overlay = False
-
-	# END OF USER INPUTS #
-
 
 	#######################################################
 	#######################################################
@@ -287,9 +330,9 @@ def plot_tomogram(dopmap_dir, dopmap_name, ax, colormap='magma', vmin=1, vmax=99
 		          ["0$^{\circ}$",
 		           "90$^{\circ}$",
 		           "180$^{\circ}$   ",
-		           "\n\n270$^{\circ}$\n"+r"($v$, $\theta$) [km s$^{-1}$, deg.]"])
+		           "\n\n270$^{\circ}$\n"+r"($v$, $\theta$) [km s$^{-1}$, deg.]"], color='k')
 
-	ax.grid(color = 'k', alpha = 0.5, ls = ":")
+	ax.grid(color = 'g', alpha = 0.5, ls = ":")
 
 
 
@@ -327,7 +370,7 @@ def plot_tomogram(dopmap_dir, dopmap_name, ax, colormap='magma', vmin=1, vmax=99
 
 
 	# Finally, set the radial labels.
-	ax.set_rgrids(vel2pix,[int(a) for a in vel], 20, fontsize=15, color = '0.3')
+	ax.set_rgrids(vel2pix,[int(a) for a in vel], 20, fontsize=15, color = 'k')
 
 	# Set the position angle for the radial labels.
 	ax.set_rlabel_position(r_label_angle)
@@ -488,8 +531,8 @@ def ReadDopFile(filename, ):
 
 def ReadXspec(filename, no_spectra, resids=False, components=False, no_components=1):
 	'''
-	Load the Xspec, and iterate across each line
-	with Python's csv reader.
+	Custom command for loading saved plotting files from Xspec. Assumes the files
+    have been slightly edited.
 	'''
 	# A flag that will be triggered once the csv reader has
 	# reached the part of the file with the tomography.
@@ -514,7 +557,7 @@ def ReadXspec(filename, no_spectra, resids=False, components=False, no_component
 			for idx, row in enumerate(reader):
 
 				if "NO" in row[0]:
-					energies.append([energy,energy_err,flux,flux_err,model, comps])
+					energies.append([energy, energy_err, flux, flux_err, model, comps])
 					energy = []
 					energy_err = []
 					flux = []
